@@ -1,154 +1,112 @@
 ﻿using System;
-using System.Net;
 using System.IO;
+using System.Net.Http;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
+using System.Linq;
 
-namespace MultiThreaded_downloader
+class NewDownloader
 {
-    class NewDownloader
+    private readonly string url;
+    private readonly string outputPath;
+    private readonly int threadCount;
+    private readonly List<string> tempFiles = new();
+    private static readonly HttpClient httpClient = new();
+    private readonly string fileName;
+    private readonly string fileExtension;
+
+    public NewDownloader(string url, string outputPath, int threadCount)
     {
-        string _SourceUrl;
-        string _DestinationPath;
-        Int64 ContentLength;
-        volatile bool _allowed = true;
-        volatile bool _allowed0 = true;
-        long min = 0;
-        long mid = 15000;
-        String[] disposeablePaths;
+        this.url = url;
+        this.outputPath = outputPath;
+        this.threadCount = threadCount;
+        (this.fileName, this.fileExtension) = ExtractFileInfo(url);
+    }
 
-        
-        public NewDownloader(string SourceURL, String[] disposablePaths, String Destination)
+    private (string fileName, string extension) ExtractFileInfo(string url)
+    {
+        var uri = new Uri(url);
+        var path = Uri.UnescapeDataString(uri.AbsolutePath);
+        return (
+            Path.GetFileNameWithoutExtension(path),
+            Path.GetExtension(path)
+        );
+    }
+
+    public string GetFileName() => fileName;
+    public string GetFileExtension() => fileExtension;
+    public string GetFullFileName() => SanitizeFileName($"{fileName}{fileExtension}");
+
+    private string SanitizeFileName(string fileName)
+    {
+        return string.Join("_", fileName.Split(Path.GetInvalidFileNameChars()));
+    }
+
+    public async Task<TimeSpan> DownloadFileAsync(CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        using var response = await httpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, url), cancellationToken);
+        var fileSize = response.Content.Headers.ContentLength ??
+            throw new InvalidOperationException("Content length not available");
+
+        var tasks = new List<Task>();
+        var chunkSize = fileSize / threadCount;
+        for (int i = 0; i < threadCount; i++)
         {
-            _SourceUrl = SourceURL;
-            this.disposeablePaths = disposablePaths;
-            this._DestinationPath = Destination +"/"+ FileInfo().Item2.Substring(FileInfo().Item2.IndexOf("/") + 1);
+            var start = i * chunkSize;
+            var end = (i == threadCount - 1) ? fileSize - 1 : start + chunkSize - 1;
+            var tempFile = $"{outputPath}.part{i}";
+            tempFiles.Add(tempFile);
+            tasks.Add(DownloadChunkAsync(start, end, tempFile, cancellationToken));
         }
 
-        public Tuple<long, String> FileInfo()
+        await Task.WhenAll(tasks);
+        await MergeFilesAsync(cancellationToken);
+
+        stopwatch.Stop();
+        return stopwatch.Elapsed;
+    }
+
+    private async Task DownloadChunkAsync(long start, long end, string tempFile, CancellationToken cancellationToken)
+    {
+        try
         {
-            var webRequest = WebRequest.Create(_SourceUrl);
-            webRequest.Method = "HEAD";
-            WebResponse response = webRequest.GetResponse();
-            String type = response.ContentType;
-            ContentLength = response.ContentLength;
-            response.Close();
-            return new Tuple<long, String>(ContentLength, type);
-        }
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, end);
 
-        
-        public void Download()
+            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var fileStream = new FileStream(tempFile, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true);
+
+            await stream.CopyToAsync(fileStream, cancellationToken);
+        }
+        catch (TaskCanceledException)
         {
-            object fileStream1 = null;
-            object fileStream2 = null;
-
-
-
-            Thread thread1 = new(() =>
-           {
-               var Data = new DownloadableData(_SourceUrl, min, FileInfo().Item1 / 4);
-               WebResponse webResponse = Data.request();
-               var responseStream = webResponse.GetResponseStream();
-               var fileStream = new FileStream(disposeablePaths[0], FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-               var buffer = new byte[1000 * 1024];
-               
-               while (_allowed)
-               {
-                   var d1 = responseStream.Read(buffer, 0, buffer.Length);
-                   Console.Write($"File downloaded " + d1);
-                   fileStream.Write(buffer, 0, d1);
-                   if (d1 == 0)
-                   {
-                       fileStream.Close();
-                       break;
-                   }
-               }
-
-               fileStream1 = fileStream;
-           });
-
-            Thread thread2 = new(() =>
-           {
-               var Data = new DownloadableData(_SourceUrl, FileInfo().Item1 / 4, FileInfo().Item1 * 3 / 4);
-               WebResponse webResponse = Data.request();
-               var responseStream = webResponse.GetResponseStream();
-               var fileStream = new FileStream(disposeablePaths[1], FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-               var buffer2 = new byte[1000 * 1024];
-               while (_allowed0)
-               {
-                   var d2 = responseStream.Read(buffer2, 0, buffer2.Length);
-                   fileStream.Write(buffer2, 0, d2);
-                   if (d2 == 0)
-                   {
-                       Console.Write($"File downloaded " + d2);
-                       fileStream.Close();
-                       break;
-                   }
-               }
-
-               fileStream2 = fileStream;
-           });
-            Thread thread3 = new(() =>
-            {
-                var Data = new DownloadableData(_SourceUrl, FileInfo().Item1 * 3 / 4, FileInfo().Item1);
-                WebResponse webResponse = Data.request();
-                var responseStream = webResponse.GetResponseStream();
-                var fileStream = new FileStream(disposeablePaths[2], FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-                var buffer3 = new byte[1000 * 1024];
-                while (_allowed0)
-                {
-                    var d3 = responseStream.Read(buffer3, 0, buffer3.Length);
-                    fileStream.Write(buffer3, 0, d3);
-                    Console.Write($"File downloaded " + d3);
-                    if (d3 == 0)
-                    {
-                        fileStream.Close();
-                        break;
-                    }
-                }
-
-
-            });
-            thread1.Start();
-            thread2.Start();
-            thread3.Start();
-            thread1.Join();
-            thread2.Join();
-            thread3.Join();
-            try
-            {
-                using var outputStream = File.Create(_DestinationPath);
-                for (int i = 0; i < disposeablePaths.Length; i++)
-                {
-                    var buffer = new byte[1024 * 1000];
-
-                    using var input = File.Open(disposeablePaths[i], FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-                    while (true)
-                    {
-                        var bus = input.Read(buffer, 0, buffer.Length);
-                        outputStream.Write(buffer, 0, bus);
-                        Console.Write($"File downloaded " + bus);
-                        Console.WriteLine(disposeablePaths[i] + bus);
-                        if(bus == 0)
-                        {
-                            outputStream.Close();
-                            break;
-                        }
-                    }
-                }
-
-            }
-
-            catch (Exception e)
-            {
-                Console.WriteLine("Error Copying " + e.Message);
-            }
-
+            Console.WriteLine($"Chunk {start}-{end} download was canceled.");
         }
-        
-
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error downloading chunk {start}-{end}: {ex.Message}");
+        }
     }
 
 
-
-
+    private async Task MergeFilesAsync(CancellationToken cancellationToken)
+    {
+        var finalPath = Path.Combine(outputPath, GetFullFileName());
+        await using var output = new FileStream(finalPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+        foreach (var tempFile in tempFiles)
+        {
+            await using (var input = new FileStream(tempFile, FileMode.Open))
+            {
+                await input.CopyToAsync(output, cancellationToken);
+            }
+            File.Delete(tempFile);
+        }
+    }
 }
